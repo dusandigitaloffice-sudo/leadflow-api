@@ -230,7 +230,7 @@ const renderFormHTML = async (req, res) => {
     const br = t.borderRadius || 10;
     const ff = t.fontFamily || 'Outfit';
     const btnText = t.buttonText || 'Submit';
-    const successMsg = t.successMessage || 'Thanks! We\\'ll be in touch.';
+    const successMsg = t.successMessage || 'Thanks! We will be in touch.';
     const steps = form.steps || [];
     const isMultiStep = steps.length > 1;
     const API_BASE = `https://${req.get('host')}`;
