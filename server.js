@@ -205,7 +205,7 @@ const submitForm = async (req, res) => {
 
         // Auto Source Detection → GHL tags
         if (sourceData) {
-          if (sourceData.platform) contact.tags.push('source:' + sourceData.platform.toLowerCase());
+          if (sourceData.utm_source) contact.tags.push('source:' + sourceData.utm_source.toLowerCase());
           if (sourceData.utm_source) contact.tags.push('utm_source:' + sourceData.utm_source);
           if (sourceData.utm_medium) contact.tags.push('utm_medium:' + sourceData.utm_medium);
           if (sourceData.utm_campaign) contact.tags.push('utm_campaign:' + sourceData.utm_campaign);
@@ -467,15 +467,7 @@ const renderFormHTML = async (req, res) => {
       var p = new URLSearchParams(window.location.search), s = {};
       ['utm_source','utm_medium','utm_campaign','utm_content','utm_term'].forEach(function(k) { var v = p.get(k); if (v) s[k] = v; });
       var cids = {fbclid:'Meta',ttclid:'TikTok',gclid:'Google',li_fat_id:'LinkedIn',msclkid:'Microsoft',twclid:'Twitter',sccid:'Snapchat',pin_unauth:'Pinterest'};
-      for (var k in cids) { if (p.get(k)) { s.platform = cids[k]; s.click_id = p.get(k); s.click_id_type = k; break; } }
-      if (!s.platform && s.utm_source) {
-        var src = s.utm_source.toLowerCase();
-        if (/facebook|\\bfb\\b|meta|instagram|\\big\\b/.test(src)) s.platform = 'Meta';
-        else if (/google/.test(src)) s.platform = 'Google';
-        else if (/tiktok/.test(src)) s.platform = 'TikTok';
-        else if (/linkedin/.test(src)) s.platform = 'LinkedIn';
-        else s.platform = s.utm_source;
-      }
+      for (var k in cids) { if (p.get(k)) { s.click_id = p.get(k); s.click_id_type = k; break; } }
       return Object.keys(s).length ? s : null;
     }
     var fmSource = fmGetSource();
