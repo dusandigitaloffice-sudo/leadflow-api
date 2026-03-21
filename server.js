@@ -210,14 +210,15 @@ const submitForm = async (req, res) => {
           if (sourceData.utm_campaign) contact.tags.push('utm_campaign:' + sourceData.utm_campaign);
         }
 
-        // Conditional Logic → GHL tags from rules
-        let pipelineOverride = null, stageOverride = null;
+        // Conditional Logic → GHL tags + redirect from rules
+        let pipelineOverride = null, stageOverride = null, ruleRedirect = null;
         if (form.rules && form.rules.length) {
           form.rules.forEach(rule => {
             if (evalRule(rule, formData)) {
               (rule.actions || []).forEach(a => {
                 if (a.type === 'add_tag' && a.value) contact.tags.push(a.value);
                 if (a.type === 'set_pipeline') { pipelineOverride = a.pipeline_id; stageOverride = a.stage_id; }
+                if (a.type === 'redirect' && a.value) ruleRedirect = a.value;
               });
             }
           });
@@ -257,6 +258,20 @@ const submitForm = async (req, res) => {
       sub = s;
     }
 
+    // Evaluate redirect rules (also when GHL is not enabled)
+    let redirectUrl = null;
+    if (form.rules && form.rules.length) {
+      form.rules.forEach(rule => {
+        if (evalRule(rule, formData)) {
+          (rule.actions || []).forEach(a => {
+            if (a.type === 'redirect' && a.value) redirectUrl = a.value;
+          });
+        }
+      });
+    }
+    // Fallback to default redirect from theme
+    if (!redirectUrl && form.theme?.redirectUrl) redirectUrl = form.theme.redirectUrl;
+
     // Webhook on Submit
     if (form.webhook_url) {
       fireWebhook(form.webhook_url, {
@@ -272,7 +287,7 @@ const submitForm = async (req, res) => {
       });
     }
 
-    res.json({ success: true, submission_id: sub?.id, status, source: sourceData || null });
+    res.json({ success: true, submission_id: sub?.id, status, source: sourceData || null, redirect_url: redirectUrl || null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -352,6 +367,7 @@ const renderFormHTML = async (req, res) => {
     const formName = escapeHtml(form.name);
     const rules = form.rules || [];
     const pixelId = form.pixel_id || '';
+    const defaultRedirect = t.redirectUrl || '';
 
     const bg = isDark ? '#0a0a0f' : '#f5f5fa';
     const cardBg = isDark ? '#0e0e16' : '#ffffff';
@@ -556,10 +572,16 @@ const renderFormHTML = async (req, res) => {
         var r = await fetch('${API_BASE}/api/public/submit/${form.id}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         if(r.ok){
           fmSubmitted = true;
-          document.getElementById('fm-form-content').style.display='none';
-          document.getElementById('fm-success').style.display='block';
+          var res = await r.json();
           ${pixelId ? `if(typeof fbq==='function') fbq('track','Lead',{form_id:'${form.id}',form_name:'${escapeHtml(form.name).replace(/'/g,"\\'")}',source:fmSource?fmSource.platform||'direct':'direct'});` : ''}
           if(window.parent!==window) window.parent.postMessage({type:'floumate-submit',formId:'${form.id}',source:fmSource},'*');
+          var redir = res.redirect_url || '${escapeHtml(defaultRedirect)}';
+          if(redir){
+            setTimeout(function(){ window.location.href = redir; }, 300);
+          } else {
+            document.getElementById('fm-form-content').style.display='none';
+            document.getElementById('fm-success').style.display='block';
+          }
         }
       } catch(err){console.error(err);}
       return false;
