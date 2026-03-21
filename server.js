@@ -186,7 +186,8 @@ const submitForm = async (req, res) => {
 
     // Delete any partial submission for this session
     if (sessionId) {
-      await supabase.from('submissions').delete().eq('form_id', form.id).eq('status', 'partial').eq('session_id', sessionId).catch(() => {});
+      const { error: delErr } = await supabase.from('submissions').delete().eq('form_id', form.id).eq('status', 'partial').eq('session_id', sessionId);
+      if (delErr) { /* session_id column may not exist yet, ignore */ }
     }
 
     if (form.ghl_key && form.ghl_location_id) {
@@ -246,17 +247,15 @@ const submitForm = async (req, res) => {
     if (sessionId) insertData.session_id = sessionId;
 
     let sub;
-    try {
-      const { data: s } = await supabase.from('submissions').insert(insertData).select().single();
-      sub = s;
-    } catch {
-      // Fallback if columns don't exist
-      const { data: s } = await supabase.from('submissions').insert({
+    const { data: s, error: insErr } = await supabase.from('submissions').insert(insertData).select().single();
+    if (insErr) {
+      // Fallback if source/session_id columns don't exist
+      const { data: s2 } = await supabase.from('submissions').insert({
         form_id: form.id, data: { ...formData, _source: sourceData, _session_id: sessionId },
         ghl_contact_id, ghl_opportunity_id, status
       }).select().single();
-      sub = s;
-    }
+      sub = s2;
+    } else { sub = s; }
 
     // Evaluate redirect rules (also when GHL is not enabled)
     let redirectUrl = null;
@@ -306,22 +305,13 @@ const partialSubmit = async (req, res) => {
     };
     if (sourceData) insertData.source = sourceData;
 
-    // Upsert: update if session exists, else insert
-    const { data: existing } = await supabase.from('submissions')
-      .select('id').eq('form_id', req.params.formId).eq('session_id', sessionId).eq('status', 'partial').maybeSingle();
-
-    if (existing) {
-      await supabase.from('submissions').update({ data: formData || {}, step_reached: stepReached, source: sourceData || null }).eq('id', existing.id);
-    } else {
-      try {
-        await supabase.from('submissions').insert(insertData);
-      } catch {
-        // Fallback if columns don't exist
-        await supabase.from('submissions').insert({
-          form_id: req.params.formId, status: 'partial',
-          data: { ...formData, _session_id: sessionId, _step_reached: stepReached, _total_steps: totalSteps, _source: sourceData },
-        });
-      }
+    // Try insert with all columns, fallback to basic columns
+    const { error: insErr } = await supabase.from('submissions').insert(insertData);
+    if (insErr) {
+      await supabase.from('submissions').insert({
+        form_id: req.params.formId, status: 'partial',
+        data: { ...(formData || {}), _session_id: sessionId, _step_reached: stepReached, _total_steps: totalSteps, _source: sourceData },
+      });
     }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
