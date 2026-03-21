@@ -23,6 +23,18 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+function evalRule(rule, formData) {
+  const val = String(formData[rule.field_id] || '');
+  switch (rule.operator) {
+    case 'equals': return val === rule.value;
+    case 'not_equals': return val !== rule.value;
+    case 'contains': return val.toLowerCase().includes((rule.value || '').toLowerCase());
+    case 'is_empty': return !val;
+    case 'is_not_empty': return !!val;
+    default: return false;
+  }
+}
+
 async function ghlFetch(method, path, apiKey, body = null) {
   const opts = { method, headers: { 'Authorization': `Bearer ${apiKey}`, 'Version': GHL_VERSION, 'Content-Type': 'application/json', 'Accept': 'application/json' } };
   if (body && ['POST', 'PUT', 'PATCH'].includes(method)) opts.body = JSON.stringify(body);
@@ -32,7 +44,16 @@ async function ghlFetch(method, path, apiKey, body = null) {
   return d;
 }
 
-// Auth middleware
+async function fireWebhook(url, payload) {
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) { console.error('Webhook error:', e.message); }
+}
+
 async function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'No token' });
@@ -46,8 +67,7 @@ async function requireAuth(req, res, next) {
 // ROUTES
 // ============================================================
 
-// Health
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'floumate-api', version: '3.0.0' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'floumate-api', version: '4.0.0' }));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 // ===== AUTH =====
@@ -56,10 +76,7 @@ const authSignup = async (req, res) => {
     const { email, password, name } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
     if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    const { data, error } = await supabase.auth.admin.createUser({
-      email, password, email_confirm: true,
-      user_metadata: { name: name || '' }
-    });
+    const { data, error } = await supabase.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { name: name || '' } });
     if (error) throw error;
     const { data: signIn, error: signErr } = await supabase.auth.signInWithPassword({ email, password });
     if (signErr) throw signErr;
@@ -86,21 +103,16 @@ const authRefresh = async (req, res) => {
   } catch (err) { res.status(401).json({ error: err.message }); }
 };
 
-const authMe = [requireAuth, (req, res) => {
-  res.json({ user: { id: req.user.id, email: req.user.email } });
-}];
+const authMe = [requireAuth, (req, res) => { res.json({ user: { id: req.user.id, email: req.user.email } }); }];
 
-// Register auth routes on BOTH paths
-app.post('/api/auth/signup', authSignup);
-app.post('/auth/signup', authSignup);
-app.post('/api/auth/login', authLogin);
-app.post('/auth/login', authLogin);
-app.post('/api/auth/refresh', authRefresh);
-app.post('/auth/refresh', authRefresh);
-app.get('/api/auth/me', ...authMe);
-app.get('/auth/me', ...authMe);
+app.post('/api/auth/signup', authSignup); app.post('/auth/signup', authSignup);
+app.post('/api/auth/login', authLogin); app.post('/auth/login', authLogin);
+app.post('/api/auth/refresh', authRefresh); app.post('/auth/refresh', authRefresh);
+app.get('/api/auth/me', ...authMe); app.get('/auth/me', ...authMe);
 
 // ===== FORMS CRUD =====
+const FORM_FIELDS = ['name','steps','theme','ghl_key','ghl_location_id','ghl_pipeline_id','ghl_stage_id','ghl_field_map','rules','pixel_id','webhook_url'];
+
 const getForms = [requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabase.from('forms').select('id, name, steps, theme, created_at, updated_at').eq('user_id', req.user.id).order('updated_at', { ascending: false });
@@ -134,7 +146,7 @@ const createForm = [requireAuth, async (req, res) => {
 const updateForm = [requireAuth, async (req, res) => {
   try {
     const updates = {};
-    ['name','steps','theme','ghl_key','ghl_location_id','ghl_pipeline_id','ghl_stage_id','ghl_field_map'].forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
+    FORM_FIELDS.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
     const { data, error } = await supabase.from('forms').update(updates).eq('id', req.params.id).eq('user_id', req.user.id).select().single();
     if (error) throw error;
     res.json({ form: data });
@@ -149,22 +161,16 @@ const deleteForm = [requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 }];
 
-// Register form routes on BOTH paths
-app.get('/api/forms', ...getForms);
-app.get('/forms', ...getForms);
-app.get('/api/forms/:id', ...getForm);
-app.get('/forms/:id', ...getForm);
-app.post('/api/forms', ...createForm);
-app.post('/forms', ...createForm);
-app.put('/api/forms/:id', ...updateForm);
-app.put('/forms/:id', ...updateForm);
-app.delete('/api/forms/:id', ...deleteForm);
-app.delete('/forms/:id', ...deleteForm);
+app.get('/api/forms', ...getForms); app.get('/forms', ...getForms);
+app.get('/api/forms/:id', ...getForm); app.get('/forms/:id', ...getForm);
+app.post('/api/forms', ...createForm); app.post('/forms', ...createForm);
+app.put('/api/forms/:id', ...updateForm); app.put('/forms/:id', ...updateForm);
+app.delete('/api/forms/:id', ...deleteForm); app.delete('/forms/:id', ...deleteForm);
 
-// ===== PUBLIC FORM + SUBMIT (for embeds) =====
+// ===== PUBLIC FORM + SUBMIT =====
 const getPublicForm = async (req, res) => {
   try {
-    const { data, error } = await supabase.from('forms').select('id, name, steps, theme, ghl_key, ghl_location_id, ghl_pipeline_id, ghl_stage_id, ghl_field_map').eq('id', req.params.id).single();
+    const { data, error } = await supabase.from('forms').select('id, name, steps, theme, ghl_key, ghl_location_id, ghl_pipeline_id, ghl_stage_id, ghl_field_map, rules, pixel_id, webhook_url').eq('id', req.params.id).single();
     if (error || !data) return res.status(404).json({ error: 'Form not found' });
     res.json({ form: data });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -175,8 +181,13 @@ const submitForm = async (req, res) => {
     const { data: form, error: fErr } = await supabase.from('forms').select('*').eq('id', req.params.formId).single();
     if (fErr || !form) return res.status(404).json({ error: 'Form not found' });
 
-    const { formData, sourceData } = req.body;
+    const { formData, sourceData, sessionId } = req.body;
     let ghl_contact_id = null, ghl_opportunity_id = null, status = 'success';
+
+    // Delete any partial submission for this session
+    if (sessionId) {
+      await supabase.from('submissions').delete().eq('form_id', form.id).eq('status', 'partial').eq('session_id', sessionId).catch(() => {});
+    }
 
     if (form.ghl_key && form.ghl_location_id) {
       try {
@@ -191,55 +202,117 @@ const submitForm = async (req, res) => {
           else { if (f.type === 'email' && !contact.email) contact.email = sv; else if (f.type === 'phone' && !contact.phone) contact.phone = sv; else if (f.type === 'text' && !contact.firstName) { const p = sv.split(' '); contact.firstName = p[0] || ''; contact.lastName = p.slice(1).join(' ') || ''; } }
         });
 
-        // Auto Source Detection → GHL tags + custom fields
+        // Auto Source Detection → GHL tags
         if (sourceData) {
-          if (sourceData.platform) {
-            contact.tags.push('source:' + sourceData.platform.toLowerCase());
-          }
-          if (sourceData.utm_source) {
-            contact.tags.push('utm_source:' + sourceData.utm_source);
-          }
-          if (sourceData.utm_medium) {
-            contact.tags.push('utm_medium:' + sourceData.utm_medium);
-          }
-          if (sourceData.utm_campaign) {
-            contact.tags.push('utm_campaign:' + sourceData.utm_campaign);
-          }
+          if (sourceData.platform) contact.tags.push('source:' + sourceData.platform.toLowerCase());
+          if (sourceData.utm_source) contact.tags.push('utm_source:' + sourceData.utm_source);
+          if (sourceData.utm_medium) contact.tags.push('utm_medium:' + sourceData.utm_medium);
+          if (sourceData.utm_campaign) contact.tags.push('utm_campaign:' + sourceData.utm_campaign);
+        }
+
+        // Conditional Logic → GHL tags from rules
+        let pipelineOverride = null, stageOverride = null;
+        if (form.rules && form.rules.length) {
+          form.rules.forEach(rule => {
+            if (evalRule(rule, formData)) {
+              (rule.actions || []).forEach(a => {
+                if (a.type === 'add_tag' && a.value) contact.tags.push(a.value);
+                if (a.type === 'set_pipeline') { pipelineOverride = a.pipeline_id; stageOverride = a.stage_id; }
+              });
+            }
+          });
         }
 
         if (cfs.length) contact.customFields = cfs;
         const cRes = await ghlFetch('POST', '/contacts/', form.ghl_key, contact);
         ghl_contact_id = cRes.contact?.id;
-        if (ghl_contact_id && form.ghl_pipeline_id && form.ghl_stage_id) {
-          const oRes = await ghlFetch('POST', '/opportunities/', form.ghl_key, { pipelineId: form.ghl_pipeline_id, pipelineStageId: form.ghl_stage_id, locationId: form.ghl_location_id, contactId: ghl_contact_id, name: `${contact.firstName || ''} ${contact.lastName || ''} - ${form.name}`.trim(), status: 'open' });
+
+        const pid = pipelineOverride || form.ghl_pipeline_id;
+        const sid = stageOverride || form.ghl_stage_id;
+        if (ghl_contact_id && pid && sid) {
+          const oRes = await ghlFetch('POST', '/opportunities/', form.ghl_key, {
+            pipelineId: pid, pipelineStageId: sid, locationId: form.ghl_location_id,
+            contactId: ghl_contact_id, name: `${contact.firstName || ''} ${contact.lastName || ''} - ${form.name}`.trim(), status: 'open'
+          });
           ghl_opportunity_id = oRes.opportunity?.id;
         }
       } catch (e) { console.error('GHL:', e.message); status = 'ghl_error'; }
     }
 
-    // Store submission with source data
+    // Store submission
     const insertData = { form_id: form.id, data: formData, ghl_contact_id, ghl_opportunity_id, status };
     if (sourceData) insertData.source = sourceData;
+    if (sessionId) insertData.session_id = sessionId;
 
     let sub;
     try {
       const { data: s } = await supabase.from('submissions').insert(insertData).select().single();
       sub = s;
-    } catch (insertErr) {
-      // Fallback: if 'source' column doesn't exist yet, store source inside data
-      const fallbackData = { ...formData, _source: sourceData };
-      const { data: s } = await supabase.from('submissions').insert({ form_id: form.id, data: fallbackData, ghl_contact_id, ghl_opportunity_id, status }).select().single();
+    } catch {
+      // Fallback if columns don't exist
+      const { data: s } = await supabase.from('submissions').insert({
+        form_id: form.id, data: { ...formData, _source: sourceData, _session_id: sessionId },
+        ghl_contact_id, ghl_opportunity_id, status
+      }).select().single();
       sub = s;
+    }
+
+    // Webhook on Submit
+    if (form.webhook_url) {
+      fireWebhook(form.webhook_url, {
+        event: 'form_submission',
+        form_id: form.id,
+        form_name: form.name,
+        submission_id: sub?.id,
+        data: formData,
+        source: sourceData || null,
+        ghl_contact_id,
+        ghl_opportunity_id,
+        submitted_at: new Date().toISOString(),
+      });
     }
 
     res.json({ success: true, submission_id: sub?.id, status, source: sourceData || null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
-app.get('/api/public/forms/:id', getPublicForm);
-app.get('/public/forms/:id', getPublicForm);
-app.post('/api/public/submit/:formId', submitForm);
-app.post('/public/submit/:formId', submitForm);
+app.get('/api/public/forms/:id', getPublicForm); app.get('/public/forms/:id', getPublicForm);
+app.post('/api/public/submit/:formId', submitForm); app.post('/public/submit/:formId', submitForm);
+
+// ===== PARTIAL SUBMIT (for drop-off tracking) =====
+const partialSubmit = async (req, res) => {
+  try {
+    const { formData, sourceData, sessionId, stepReached, totalSteps } = req.body;
+    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+
+    const insertData = {
+      form_id: req.params.formId, data: formData || {}, status: 'partial',
+      session_id: sessionId, step_reached: stepReached, total_steps: totalSteps,
+    };
+    if (sourceData) insertData.source = sourceData;
+
+    // Upsert: update if session exists, else insert
+    const { data: existing } = await supabase.from('submissions')
+      .select('id').eq('form_id', req.params.formId).eq('session_id', sessionId).eq('status', 'partial').maybeSingle();
+
+    if (existing) {
+      await supabase.from('submissions').update({ data: formData || {}, step_reached: stepReached, source: sourceData || null }).eq('id', existing.id);
+    } else {
+      try {
+        await supabase.from('submissions').insert(insertData);
+      } catch {
+        // Fallback if columns don't exist
+        await supabase.from('submissions').insert({
+          form_id: req.params.formId, status: 'partial',
+          data: { ...formData, _session_id: sessionId, _step_reached: stepReached, _total_steps: totalSteps, _source: sourceData },
+        });
+      }
+    }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+};
+
+app.post('/api/public/partial/:formId', partialSubmit); app.post('/public/partial/:formId', partialSubmit);
 
 // ===== SUBMISSIONS =====
 const getSubmissions = [requireAuth, async (req, res) => {
@@ -252,8 +325,7 @@ const getSubmissions = [requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 }];
 
-app.get('/api/forms/:id/submissions', ...getSubmissions);
-app.get('/forms/:id/submissions', ...getSubmissions);
+app.get('/api/forms/:id/submissions', ...getSubmissions); app.get('/forms/:id/submissions', ...getSubmissions);
 
 // ===== GHL PROXY =====
 app.get('/api/pipelines', async (req, res) => { try { const k = req.headers['x-ghl-key']; const { locationId } = req.query; if (!k || !locationId) return res.status(400).json({ error: 'Missing params' }); res.json(await ghlFetch('GET', `/opportunities/pipelines?locationId=${locationId}`, k)); } catch (e) { res.status(e.status || 500).json({ error: e.message }); } });
@@ -264,7 +336,7 @@ app.get('/api/custom-fields', async (req, res) => { try { const k = req.headers[
 // ===== PUBLIC FORM VIEW (HTML) =====
 const renderFormHTML = async (req, res) => {
   try {
-    const { data: form, error } = await supabase.from('forms').select('id, name, steps, theme').eq('id', req.params.id).single();
+    const { data: form, error } = await supabase.from('forms').select('id, name, steps, theme, rules, pixel_id').eq('id', req.params.id).single();
     if (error || !form) return res.status(404).send('<h1>Form not found</h1>');
 
     const t = form.theme || {};
@@ -278,6 +350,8 @@ const renderFormHTML = async (req, res) => {
     const isMultiStep = steps.length > 1;
     const API_BASE = `https://${req.get('host')}`;
     const formName = escapeHtml(form.name);
+    const rules = form.rules || [];
+    const pixelId = form.pixel_id || '';
 
     const bg = isDark ? '#0a0a0f' : '#f5f5fa';
     const cardBg = isDark ? '#0e0e16' : '#ffffff';
@@ -293,7 +367,6 @@ const renderFormHTML = async (req, res) => {
       const ph = escapeHtml(f.placeholder || '');
       const label = escapeHtml(f.label);
       const inputStyle = `width:100%;padding:10px 13px;background:${inBg};border:1px solid ${inBrd};border-radius:${br}px;color:${txH};font-size:14px;font-family:'${ff}',sans-serif;outline:none;transition:border-color .2s;`;
-
       if (f.type === 'textarea') return `<textarea name="${f.id}" placeholder="${ph}" rows="3" ${req_attr} style="${inputStyle}resize:vertical;"></textarea>`;
       if (f.type === 'select') return `<select name="${f.id}" ${req_attr} style="${inputStyle}"><option value="">${ph || 'Select...'}</option>${(f.options||[]).map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('')}</select>`;
       if (f.type === 'checkbox') return `<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:${txM};cursor:pointer;"><input type="checkbox" name="${f.id}" style="accent-color:${pc};" ${req_attr}/>${ph || label}</label>`;
@@ -302,18 +375,16 @@ const renderFormHTML = async (req, res) => {
 
     const stepsHTML = steps.map((s, si) => {
       const fieldsHTML = (s.fields || []).map(f => `
-        <div style="margin-bottom:14px;">
+        <div class="fm-field" data-field-id="${f.id}" style="margin-bottom:14px;">
           <label style="display:block;font-size:13px;font-weight:500;margin-bottom:5px;color:${txM};font-family:'${ff}',sans-serif;">
             ${escapeHtml(f.label)}${f.required ? `<span style="color:${pc};"> *</span>` : ''}
           </label>
           ${renderField(f)}
         </div>
       `).join('');
-
       return `<div class="fm-step" data-step="${si}" style="display:${si === 0 ? 'block' : 'none'};">${fieldsHTML}</div>`;
     }).join('');
 
-    // Step indicator
     const stepIndicator = isMultiStep ? `
       <div id="fm-step-indicator" style="display:flex;align-items:center;gap:6px;margin:14px 0 18px;">
         ${steps.map((s, i) => `
@@ -325,16 +396,23 @@ const renderFormHTML = async (req, res) => {
       </div>
     ` : '';
 
-    // Navigation buttons
     const navButtons = isMultiStep ? `
       <div id="fm-nav" style="display:flex;gap:8px;margin-top:6px;">
         <button type="button" id="fm-back" onclick="fmPrev()" style="display:none;flex:1;padding:11px 0;background:${isDark ? '#1a1a25' : '#eee'};color:${isDark ? '#9a9ab0' : '#555'};border:none;border-radius:${br}px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:'${ff}',sans-serif;">Back</button>
         <button type="button" id="fm-next" onclick="fmNext()" style="flex:1;padding:11px 0;background:${pc};color:#fff;border:none;border-radius:${br}px;font-size:14.5px;font-weight:600;cursor:pointer;font-family:'${ff}',sans-serif;">Next</button>
         <button type="submit" id="fm-submit" style="display:none;flex:1;padding:11px 0;background:${pc};color:#fff;border:none;border-radius:${br}px;font-size:14.5px;font-weight:600;cursor:pointer;font-family:'${ff}',sans-serif;">${btnText}</button>
       </div>
-    ` : `
-      <button type="submit" style="width:100%;padding:11px 0;margin-top:6px;background:${pc};color:#fff;border:none;border-radius:${br}px;font-size:14.5px;font-weight:600;cursor:pointer;font-family:'${ff}',sans-serif;">${btnText}</button>
-    `;
+    ` : `<button type="submit" style="width:100%;padding:11px 0;margin-top:6px;background:${pc};color:#fff;border:none;border-radius:${br}px;font-size:14.5px;font-weight:600;cursor:pointer;font-family:'${ff}',sans-serif;">${btnText}</button>`;
+
+    // Meta Pixel snippet
+    const pixelSnippet = pixelId ? `
+    <script>
+      !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');
+      fbq('init','${escapeHtml(pixelId)}');
+      fbq('track','PageView');
+    </script>
+    <noscript><img height="1" width="1" style="display:none" src="https://www.facebook.com/tr?id=${escapeHtml(pixelId)}&ev=PageView&noscript=1"/></noscript>
+    ` : '';
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -342,6 +420,7 @@ const renderFormHTML = async (req, res) => {
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>${formName} | Floumate</title>
   <link href="https://fonts.googleapis.com/css2?family=${ff.replace(/ /g,'+')}:wght@400;500;600;700&display=swap" rel="stylesheet">
+  ${pixelSnippet}
   <style>
     *{margin:0;padding:0;box-sizing:border-box;}
     body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:${bg};padding:20px;font-family:'${ff}',sans-serif;}
@@ -355,22 +434,18 @@ const renderFormHTML = async (req, res) => {
 <body>
   <div style="width:100%;max-width:480px;">
     <div style="background:${cardBg};border:1px solid ${brd};border-radius:${br+4}px;padding:28px;box-shadow:0 20px 60px rgba(0,0,0,${isDark?'0.4':'0.06'});">
-
       <div id="fm-form-content">
         <h3 style="font-size:20px;font-weight:700;margin-bottom:4px;color:${txH};">${formName}</h3>
         ${isMultiStep ? stepIndicator : `<p style="font-size:13px;margin-bottom:22px;color:${txD};">Fill in the details below</p>`}
-
         <form id="fm-form" onsubmit="return fmSubmit(event)">
           ${stepsHTML}
           ${navButtons}
         </form>
       </div>
-
       <div id="fm-success">
         <svg width="48" height="48" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="24" fill="${pc}20"/><path d="M15 24l6 6 12-12" stroke="${pc}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <h3 style="font-size:18px;font-weight:700;color:${txH};margin-bottom:6px;">${successMsg}</h3>
       </div>
-
       <p style="text-align:center;margin-top:14px;font-size:10.5px;color:${isDark?'#3e3e52':'#bbb'};">
         Powered by <span style="color:${pc};font-weight:600;">Floumate</span>
       </p>
@@ -378,123 +453,148 @@ const renderFormHTML = async (req, res) => {
   </div>
 
   <script>
-    let fmStep = 0;
-    const fmTotal = ${steps.length};
+    var fmStep = 0, fmTotal = ${steps.length}, fmSubmitted = false;
+    var fmSid = 'fm_' + Date.now() + '_' + Math.random().toString(36).substr(2,9);
 
-    // ---- Auto Source Detection ----
+    // ---- Source Detection ----
     function fmGetSource() {
-      var p = new URLSearchParams(window.location.search);
-      var s = {};
-      ['utm_source','utm_medium','utm_campaign','utm_content','utm_term'].forEach(function(k) {
-        var v = p.get(k); if (v) s[k] = v;
-      });
+      var p = new URLSearchParams(window.location.search), s = {};
+      ['utm_source','utm_medium','utm_campaign','utm_content','utm_term'].forEach(function(k) { var v = p.get(k); if (v) s[k] = v; });
       var cids = {fbclid:'Meta',ttclid:'TikTok',gclid:'Google',li_fat_id:'LinkedIn',msclkid:'Microsoft',twclid:'Twitter',sccid:'Snapchat',pin_unauth:'Pinterest'};
-      for (var k in cids) {
-        if (p.get(k)) { s.platform = cids[k]; s.click_id = p.get(k); s.click_id_type = k; break; }
-      }
+      for (var k in cids) { if (p.get(k)) { s.platform = cids[k]; s.click_id = p.get(k); s.click_id_type = k; break; } }
       if (!s.platform && s.utm_source) {
         var src = s.utm_source.toLowerCase();
-        if (src.indexOf('facebook') > -1 || src.indexOf('fb') > -1 || src.indexOf('meta') > -1 || src.indexOf('instagram') > -1 || src.indexOf('ig') > -1) s.platform = 'Meta';
-        else if (src.indexOf('google') > -1) s.platform = 'Google';
-        else if (src.indexOf('tiktok') > -1) s.platform = 'TikTok';
-        else if (src.indexOf('linkedin') > -1) s.platform = 'LinkedIn';
-        else if (src.indexOf('twitter') > -1 || src.indexOf('x.com') > -1) s.platform = 'Twitter';
+        if (/facebook|\\bfb\\b|meta|instagram|\\big\\b/.test(src)) s.platform = 'Meta';
+        else if (/google/.test(src)) s.platform = 'Google';
+        else if (/tiktok/.test(src)) s.platform = 'TikTok';
+        else if (/linkedin/.test(src)) s.platform = 'LinkedIn';
         else s.platform = s.utm_source;
-      }
-      if (document.referrer && !s.platform) {
-        try {
-          var ref = new URL(document.referrer).hostname;
-          if (ref.indexOf('google') > -1) s.platform = 'Google'; s.referrer = ref;
-          if (ref.indexOf('facebook') > -1 || ref.indexOf('instagram') > -1) { s.platform = 'Meta'; s.referrer = ref; }
-        } catch(e) {}
       }
       return Object.keys(s).length ? s : null;
     }
     var fmSource = fmGetSource();
 
-    function fmShowStep(n) {
-      document.querySelectorAll('.fm-step').forEach(function(el,i) { el.style.display = i===n ? 'block' : 'none'; });
-      document.querySelectorAll('.fm-dot').forEach(function(el,i) {
-        el.style.background = i===n ? '${pc}' : '${isDark ? '#1a1a25' : '#eee'}';
-        el.style.color = i===n ? '#fff' : '${isDark ? '#65657a' : '#999'}';
+    // ---- Conditional Logic ----
+    var fmRules = ${JSON.stringify(rules.filter(r => r.actions && r.actions.some(a => a.type === 'show_field' || a.type === 'hide_field')))};
+    function fmEvalRules() {
+      var fd = {};
+      new FormData(document.getElementById('fm-form')).forEach(function(v,k){fd[k]=v;});
+      document.querySelectorAll('#fm-form input[type=checkbox]').forEach(function(cb){fd[cb.name]=cb.checked?'true':'false';});
+      fmRules.forEach(function(rule) {
+        var val = String(fd[rule.field_id]||''), match = false;
+        if (rule.operator==='equals') match = val===rule.value;
+        else if (rule.operator==='not_equals') match = val!==rule.value;
+        else if (rule.operator==='contains') match = val.toLowerCase().indexOf((rule.value||'').toLowerCase())>-1;
+        else if (rule.operator==='is_empty') match = !val;
+        else if (rule.operator==='is_not_empty') match = !!val;
+        (rule.actions||[]).forEach(function(a) {
+          if (a.type==='show_field'||a.type==='hide_field') {
+            var el = document.querySelector('.fm-field[data-field-id="'+a.target+'"]');
+            if (el) {
+              if (a.type==='show_field') { el.style.display = match ? 'block' : 'none'; }
+              else { el.style.display = match ? 'none' : 'block'; }
+            }
+          }
+        });
       });
-      if (fmTotal > 1) {
-        document.getElementById('fm-back').style.display = n > 0 ? 'block' : 'none';
-        document.getElementById('fm-next').style.display = n < fmTotal-1 ? 'block' : 'none';
-        document.getElementById('fm-submit').style.display = n === fmTotal-1 ? 'block' : 'none';
+    }
+    document.querySelectorAll('#fm-form input,#fm-form select,#fm-form textarea').forEach(function(el){
+      el.addEventListener('change',fmEvalRules); el.addEventListener('input',fmEvalRules);
+    });
+    fmEvalRules();
+
+    // ---- Step Navigation ----
+    function fmShowStep(n) {
+      document.querySelectorAll('.fm-step').forEach(function(el,i){el.style.display=i===n?'block':'none';});
+      document.querySelectorAll('.fm-dot').forEach(function(el,i){
+        el.style.background=i===n?'${pc}':'${isDark?'#1a1a25':'#eee'}';
+        el.style.color=i===n?'#fff':'${isDark?'#65657a':'#999'}';
+      });
+      if(fmTotal>1){
+        document.getElementById('fm-back').style.display=n>0?'block':'none';
+        document.getElementById('fm-next').style.display=n<fmTotal-1?'block':'none';
+        document.getElementById('fm-submit').style.display=n===fmTotal-1?'block':'none';
       }
+      fmEvalRules();
+      ${pixelId ? `if(typeof fbq==='function') fbq('trackCustom','StepView',{form_id:'${form.id}',step:n,form_name:'${escapeHtml(form.name).replace(/'/g,"\\'")}'});` : ''}
     }
 
     function fmNext() {
-      var step = document.querySelector('.fm-step[data-step="'+fmStep+'"]');
-      var inputs = step.querySelectorAll('[required]');
-      var valid = true;
-      inputs.forEach(function(inp) { if (!inp.value.trim()) { inp.style.borderColor='#ff4757'; valid=false; } else { inp.style.borderColor='${inBrd}'; }});
-      if (!valid) { step.classList.add('fm-shake'); setTimeout(function(){step.classList.remove('fm-shake')},400); return; }
-      if (fmStep < fmTotal-1) { fmStep++; fmShowStep(fmStep); }
+      var step=document.querySelector('.fm-step[data-step="'+fmStep+'"]');
+      var inputs=step.querySelectorAll('[required]'); var valid=true;
+      inputs.forEach(function(inp){
+        var wrapper=inp.closest('.fm-field'); if(wrapper&&wrapper.style.display==='none') return;
+        if(!inp.value.trim()){inp.style.borderColor='#ff4757';valid=false;}else{inp.style.borderColor='${inBrd}';}
+      });
+      if(!valid){step.classList.add('fm-shake');setTimeout(function(){step.classList.remove('fm-shake')},400);return;}
+      if(fmStep<fmTotal-1){fmStep++;fmShowStep(fmStep);}
     }
+    function fmPrev(){if(fmStep>0){fmStep--;fmShowStep(fmStep);}}
 
-    function fmPrev() { if (fmStep > 0) { fmStep--; fmShowStep(fmStep); } }
+    // ---- Partial Submit (drop-off tracking) ----
+    function fmGetFormData() {
+      var fd = {};
+      try { new FormData(document.getElementById('fm-form')).forEach(function(v,k){fd[k]=v;}); } catch(e){}
+      document.querySelectorAll('#fm-form input[type=checkbox]').forEach(function(cb){fd[cb.name]=cb.checked;});
+      return fd;
+    }
+    function fmSavePartial() {
+      if (fmSubmitted) return;
+      var payload = JSON.stringify({formData:fmGetFormData(),sourceData:fmSource,sessionId:fmSid,stepReached:fmStep,totalSteps:fmTotal});
+      if (navigator.sendBeacon) { navigator.sendBeacon('${API_BASE}/api/public/partial/${form.id}', new Blob([payload],{type:'application/json'})); }
+    }
+    window.addEventListener('beforeunload', fmSavePartial);
+    document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='hidden') fmSavePartial(); });
 
+    // ---- Submit ----
     async function fmSubmit(e) {
       e.preventDefault();
-      var fd = {};
-      new FormData(document.getElementById('fm-form')).forEach(function(v,k) { fd[k]=v; });
-      document.querySelectorAll('#fm-form input[type=checkbox]').forEach(function(cb) { fd[cb.name] = cb.checked; });
-
-      var body = { formData: fd };
-      if (fmSource) body.sourceData = fmSource;
-
+      var fd = fmGetFormData();
+      var body = {formData:fd,sessionId:fmSid};
+      if(fmSource) body.sourceData = fmSource;
       try {
-        var r = await fetch('${API_BASE}/api/public/submit/${form.id}', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(body)
-        });
-        if (r.ok) {
+        var r = await fetch('${API_BASE}/api/public/submit/${form.id}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        if(r.ok){
+          fmSubmitted = true;
           document.getElementById('fm-form-content').style.display='none';
           document.getElementById('fm-success').style.display='block';
-          if (window.parent !== window) {
-            window.parent.postMessage({type:'floumate-submit',formId:'${form.id}',source:fmSource},'*');
-          }
+          ${pixelId ? `if(typeof fbq==='function') fbq('track','Lead',{form_id:'${form.id}',form_name:'${escapeHtml(form.name).replace(/'/g,"\\'")}',source:fmSource?fmSource.platform||'direct':'direct'});` : ''}
+          if(window.parent!==window) window.parent.postMessage({type:'floumate-submit',formId:'${form.id}',source:fmSource},'*');
         }
-      } catch(err) { console.error(err); }
+      } catch(err){console.error(err);}
       return false;
     }
   </script>
 </body>
 </html>`;
-
     res.setHeader('Content-Type', 'text/html');
     res.send(html);
   } catch (err) { res.status(500).send('<h1>Error loading form</h1>'); }
 };
 
-app.get('/api/forms/:id/view', renderFormHTML);
-app.get('/forms/:id/view', renderFormHTML);
+app.get('/api/forms/:id/view', renderFormHTML); app.get('/forms/:id/view', renderFormHTML);
 
 // ===== EMBED SCRIPT =====
 const embedScript = (req, res) => {
   const API_BASE = `https://${req.get('host')}`;
   const js = `(function(){
-  var el = document.querySelector('[data-floumate-id]') || document.querySelector('[data-form-id]') || document.querySelector('div[id^="floumate-"]') || document.querySelector('div[id^="leadflow-"]');
-  if (!el) return;
-  var formId = el.getAttribute('data-floumate-id') || el.getAttribute('data-form-id') || el.id.replace('floumate-','').replace('leadflow-','');
-  var iframe = document.createElement('iframe');
-  // Pass parent page URL params to iframe for source detection
-  var params = window.location.search || '';
-  iframe.src = '${API_BASE}/forms/' + formId + '/view' + params;
-  iframe.style.cssText = 'width:100%;border:none;min-height:500px;';
+  var el=document.querySelector('[data-floumate-id]')||document.querySelector('[data-form-id]')||document.querySelector('div[id^="floumate-"]')||document.querySelector('div[id^="leadflow-"]');
+  if(!el)return;
+  var formId=el.getAttribute('data-floumate-id')||el.getAttribute('data-form-id')||el.id.replace('floumate-','').replace('leadflow-','');
+  var iframe=document.createElement('iframe');
+  var params=window.location.search||'';
+  iframe.src='${API_BASE}/forms/'+formId+'/view'+params;
+  iframe.style.cssText='width:100%;border:none;min-height:500px;';
   iframe.setAttribute('scrolling','no');
   el.appendChild(iframe);
-  window.addEventListener('message', function(e) {
-    if (e.data && (e.data.type === 'floumate-resize' || e.data.type === 'leadflow-resize')) iframe.style.height = e.data.height + 'px';
+  window.addEventListener('message',function(e){
+    if(e.data&&(e.data.type==='floumate-resize'||e.data.type==='leadflow-resize'))iframe.style.height=e.data.height+'px';
   });
 })();`;
   res.setHeader('Content-Type', 'application/javascript');
   res.send(js);
 };
 
-app.get('/api/embed.js', embedScript);
-app.get('/embed.js', embedScript);
+app.get('/api/embed.js', embedScript); app.get('/embed.js', embedScript);
 
-app.listen(PORT, () => console.log(`Floumate API v3.0.0 on port ${PORT}`));
+app.listen(PORT, () => console.log(`Floumate API v4.0.0 on port ${PORT}`));
