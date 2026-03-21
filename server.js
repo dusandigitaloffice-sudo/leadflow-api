@@ -170,7 +170,7 @@ app.delete('/api/forms/:id', ...deleteForm); app.delete('/forms/:id', ...deleteF
 // ===== PUBLIC FORM + SUBMIT =====
 const getPublicForm = async (req, res) => {
   try {
-    const { data, error } = await supabase.from('forms').select('id, name, steps, theme, ghl_key, ghl_location_id, ghl_pipeline_id, ghl_stage_id, ghl_field_map, rules, pixel_id, webhook_url').eq('id', req.params.id).single();
+    const { data, error } = await supabase.from('forms').select('*').eq('id', req.params.id).single();
     if (error || !data) return res.status(404).json({ error: 'Form not found' });
     res.json({ form: data });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -351,7 +351,7 @@ app.get('/api/custom-fields', async (req, res) => { try { const k = req.headers[
 // ===== PUBLIC FORM VIEW (HTML) =====
 const renderFormHTML = async (req, res) => {
   try {
-    const { data: form, error } = await supabase.from('forms').select('id, name, steps, theme, rules, pixel_id').eq('id', req.params.id).single();
+    const { data: form, error } = await supabase.from('forms').select('*').eq('id', req.params.id).single();
     if (error || !form) return res.status(404).send('<h1>Form not found</h1>');
 
     const t = form.theme || {};
