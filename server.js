@@ -175,8 +175,15 @@ const submitForm = async (req, res) => {
     const { data: form, error: fErr } = await supabase.from('forms').select('*').eq('id', req.params.formId).single();
     if (fErr || !form) return res.status(404).json({ error: 'Form not found' });
 
-    const { formData, sourceData, sessionId } = req.body;
+    const { formData: rawData, sourceData, sessionId } = req.body;
     let ghl_contact_id = null, ghl_opportunity_id = null, status = 'success';
+
+    // Map field IDs to labels for clean data output
+    const allFields = (form.steps || []).flatMap(s => s.fields || []);
+    const idToLabel = {};
+    allFields.forEach(f => { idToLabel[f.id] = f.label || f.id; });
+    const formData = {};
+    Object.entries(rawData || {}).forEach(([k, v]) => { formData[idToLabel[k] || k] = v; });
 
     // Delete any partial submission for this session
     if (sessionId) {
@@ -186,12 +193,11 @@ const submitForm = async (req, res) => {
 
     if (form.ghl_key && form.ghl_location_id) {
       try {
-        const allFields = (form.steps || []).flatMap(s => s.fields || []);
         const contact = { locationId: form.ghl_location_id, tags: ['floumate'] };
         if (form.ghl_tag) contact.tags.push(form.ghl_tag);
         const cfs = [];
         allFields.forEach(f => {
-          const v = formData[f.id]; if (v === undefined || v === '' || v === null) return;
+          const v = rawData[f.id]; if (v === undefined || v === '' || v === null) return;
           const sv = Array.isArray(v) ? v.join(', ') : String(v);
           const m = (form.ghl_field_map || {})[f.id];
           if (m) { if (m.startsWith('cf_')) cfs.push({ id: m.replace('cf_', ''), field_value: sv }); else contact[m] = sv; }
@@ -209,7 +215,7 @@ const submitForm = async (req, res) => {
         let pipelineOverride = null, stageOverride = null, ruleRedirect = null;
         if (form.rules && form.rules.length) {
           form.rules.forEach(rule => {
-            if (evalRule(rule, formData)) {
+            if (evalRule(rule, rawData)) {
               (rule.actions || []).forEach(a => {
                 if (a.type === 'add_tag' && a.value) contact.tags.push(a.value);
                 if (a.type === 'set_pipeline') { pipelineOverride = a.pipeline_id; stageOverride = a.stage_id; }
