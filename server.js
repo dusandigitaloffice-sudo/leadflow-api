@@ -268,8 +268,8 @@ const submitForm = async (req, res) => {
         }
       });
     }
-    // Fallback to default redirect from theme
-    if (!redirectUrl && form.theme?.redirectUrl) redirectUrl = form.theme.redirectUrl;
+    // Fallback to default redirect from theme (only if afterSubmit is "redirect")
+    if (!redirectUrl && form.theme?.afterSubmit === 'redirect' && form.theme?.redirectUrl) redirectUrl = form.theme.redirectUrl;
 
     // Webhook on Submit
     if (form.webhook_url) {
